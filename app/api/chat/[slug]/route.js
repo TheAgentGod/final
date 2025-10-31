@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
+import OpenAI from 'openai';
 import { SYSTEM_PROMPTS } from '../../../../lib/system-prompts';
 
-export const runtime = 'nodejs'; // server only
+export const runtime = 'nodejs'; // server-only
 
 function isForbiddenExtraction(text=''){
   if(!text) return false;
@@ -24,44 +25,38 @@ export async function POST(req, { params }){
     const body = await req.json();
     const messages = Array.isArray(body?.messages) ? body.messages : [];
 
-    // Guardrails: refuse prompt extraction attempts
+    // Guardrails
     const last = messages[messages.length-1]?.content || '';
     if (isForbiddenExtraction(last)) {
-      return NextResponse.json({ reply: 'Lo siento — no puedo ayudar con esa solicitud.' });
+      return NextResponse.json({ ok:false, error:'blocked', reply: 'Lo siento — no puedo ayudar con esa solicitud.' }, { status: 200 });
     }
+
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    if (!OPENAI_API_KEY) {
+      return NextResponse.json({ ok:false, error:'missing_key', detail:'Falta OPENAI_API_KEY' }, { status: 500 });
+    }
+
+    const client = new OpenAI({ apiKey: OPENAI_API_KEY });
+    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
     // Build final messages
     const finalMessages = [
       { role: 'system', content: sys },
-      ...messages.filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({
+      ...messages.filter(m => m && (m.role === 'user' || m.role === 'assistant')).map(m => ({
         role: m.role, content: String(m.content||'').slice(0, 6000)
       }))
     ].slice(-14);
 
-    const apiKey = process.env.OPENAI_API_KEY;
-    if(!apiKey) return new Response('Missing OPENAI_API_KEY', { status: 500 });
-
-    // Call OpenAI
-    const resp = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-        messages: finalMessages,
-        temperature: 0.7
-      })
+    const completion = await client.chat.completions.create({
+      model,
+      messages: finalMessages,
+      temperature: 0.7
     });
-    if(!resp.ok){
-      const txt = await resp.text();
-      return new Response(txt, { status: resp.status });
-    }
-    const data = await resp.json();
-    const reply = data.choices?.[0]?.message?.content || '...';
-    return NextResponse.json({ reply });
+
+    const reply = completion?.choices?.[0]?.message?.content || '…';
+    return NextResponse.json({ ok:true, reply });
   }catch(e){
-    return new Response('Server error', { status: 500 });
+    const safe = (e && (e.message || e.toString())) || 'Server error';
+    return NextResponse.json({ ok:false, error:'exception', detail: safe.slice(0,400) }, { status: 500 });
   }
 }
